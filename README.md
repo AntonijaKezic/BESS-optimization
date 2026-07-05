@@ -1,16 +1,16 @@
 # BESS-optimization
 Battery Energy Storage System optimization using MILP, PV forecasting, Open-Meteo and ENTSO-E day-ahead electricity prices.
 
-# 🔋 BESS Optimization
+# BESS Optimization
 
 A Streamlit application for optimizing the operation of a Battery Energy Storage System (BESS) coupled with a photovoltaic (PV) power plant.
 
 The optimization is formulated as a Mixed-Integer Linear Programming (MILP) problem and uses:
 
-- ☀️ Open-Meteo API for solar radiation forecast
-- ⚡ ENTSO-E Transparency Platform for day-ahead electricity prices
-- 🔋 Battery operation constraints
-- 📈 Interactive visualization of optimization results
+- Open-Meteo API for solar radiation forecast
+- ENTSO-E Transparency Platform for day-ahead electricity prices
+- Battery operation constraints
+- Interactive visualization of optimization results
 
 ---
 
