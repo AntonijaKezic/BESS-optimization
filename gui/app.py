@@ -296,6 +296,19 @@ with tab_results:
 
         min_hour = results["prices"].index(min_price)
         max_hour = results["prices"].index(max_price)
+        
+        cost = results["cost"]
+
+        if cost < 0:
+            economic_result = (
+                f"Procijenjena dnevna ušteda "
+                f"iznosi **{abs(cost):.2f} €**."
+            )
+        else:
+            economic_result = (
+                f"Procijenjeni dnevni trošak "
+                f"**{cost:.2f} €**."
+            )
 
         st.markdown(f"""
         Najniža tržišna cijena iznosila je **{min_price:.2f} €/MWh**
@@ -306,21 +319,11 @@ with tab_results:
 
         Ukupna proizvedena energija iz fotonaponske elektrane iznosi
         **{sum(results["pv"]):.2f} kWh**.
-        """)
+        
+        {economic_result}"""
+        )
 
-        cost = results["cost"]
-
-        if cost < 0:
-            st.success(
-                f"💰 Primjenom optimiziranog upravljanja baterijom ostvarena je "
-                f"procijenjena dnevna ušteda od **{abs(cost):.2f} €**."
-            )
-        else:
-            st.info(
-                f"💰 Procijenjeni dnevni trošak rada baterije iznosi "
-                f"**{cost:.2f} €**."
-            )
-
+    
     # -------------------------------------------------
     # TABLICA
     # -------------------------------------------------
