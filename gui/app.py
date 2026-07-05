@@ -102,7 +102,7 @@ with st.sidebar:
     )
 
     p_max = st.number_input(
-        "Maksimalna snaga [kW]",
+        "Maksimalna priključna snaga [kW]",
         value=10.0
     )
 
@@ -202,10 +202,18 @@ with tab_results:
 
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric(
-            "Ukupan trošak",
-            f"{results['cost']:.2f} €"
-        )
+        cost = results["cost"]
+        if cost < 0:
+            c1.metric(
+                "Procijenjena ušteda",
+                f"{abs(cost):.2f} €"
+            )
+        else:
+            c1.metric(
+                "Procijenjeni trošak",
+                f"{cost:.2f} €"
+            )
+
 
         c2.metric(
             "Završni SOC",
@@ -280,15 +288,15 @@ with tab_results:
         )
 
         st.divider()
-        
+
         st.subheader("Analiza rezultata")
-        
+
         min_price = min(results["prices"])
         max_price = max(results["prices"])
 
         min_hour = results["prices"].index(min_price)
         max_hour = results["prices"].index(max_price)
-        
+
         st.markdown(f"""
         Najniža tržišna cijena iznosila je **{min_price:.2f} €/MWh**
         u **{min_hour:02d}:00 h**.
@@ -296,12 +304,22 @@ with tab_results:
         Najviša tržišna cijena iznosila je **{max_price:.2f} €/MWh**
         u **{max_hour:02d}:00 h**.
 
-        Ukupna proizvedena energija iz fotonaponske elektrane
-        iznosi **{sum(results["pv"]):.2f} kWh**.
-
-        Ukupan trošak optimizacije iznosi
-        **{results["cost"]:.2f} €**.
+        Ukupna proizvedena energija iz fotonaponske elektrane iznosi
+        **{sum(results["pv"]):.2f} kWh**.
         """)
+
+        cost = results["cost"]
+
+        if cost < 0:
+            st.success(
+                f"💰 Primjenom optimiziranog upravljanja baterijom ostvarena je "
+                f"procijenjena dnevna ušteda od **{abs(cost):.2f} €**."
+            )
+        else:
+            st.info(
+                f"💰 Procijenjeni dnevni trošak rada baterije iznosi "
+                f"**{cost:.2f} €**."
+            )
 
     # -------------------------------------------------
     # TABLICA
@@ -631,4 +649,4 @@ Računarstvo (120)\n
 Autor: Antonija Kežić\n
 Mentor: Ivo Marinić-Kragić\n
 Akademska godina: 2025./2026.
-""")   
+""")
