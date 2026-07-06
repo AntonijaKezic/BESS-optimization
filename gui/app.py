@@ -15,11 +15,14 @@ if str(ROOT) not in sys.path:
 from run_model import run_model
 
 from plots import (
-    plot_soc,
+    plot_soc_pv,
+    plot_soc_grid,
     plot_pv,
     plot_prices,
-    plot_power,
-    plot_costs
+    plot_power_pv,
+    plot_power_grid,
+    plot_costs,
+    plot_costs_pv
 )
 
 # -------------------------------------------------
@@ -54,19 +57,44 @@ tab_results, tab_model, tab_about = st.tabs([
 with st.sidebar:
 
     st.header("Parametri sustava")
+    
+    scenario = st.radio(
 
-    eta_pv = st.slider(
-        "Učinkovitost PV",
-        0.05,
-        0.30,
-        0.20,
-        0.01
+        "Scenarij rada",
+
+        [
+
+            "PV + baterija",
+
+            "Baterija spojena na mrežu"
+
+        ]
     )
 
-    p_nom_pv = st.number_input(
-        "Nazivna snaga PV [kW]",
-        value=10.0
-    )
+    if scenario == "PV + baterija":
+
+        eta_pv = st.slider(
+            "Učinkovitost PV [%]",
+
+            0.10,
+
+            0.25,
+
+            0.20,
+
+            0.01
+        )
+
+        p_nom_pv = st.number_input(
+            "Nazivna snaga PV [kW]",
+            value=10.0
+        )
+
+    else:
+
+        eta_pv = None
+
+        p_nom_pv = None
 
     soc0 = st.slider(
         "Početni SOC",
@@ -127,7 +155,12 @@ with st.sidebar:
         "Završni rad\n\nAntonija Kežić"+"\n2026."
     )
     
-    if "results" not in st.session_state:
+    if (
+    "results" not in st.session_state
+    or st.session_state.get("scenario") != scenario
+    ):
+
+        st.session_state["scenario"] = scenario
 
         st.session_state["results"] = run_model(
             eta_pv,
@@ -139,8 +172,9 @@ with st.sidebar:
             c_deg,
             p_max,
             dt,
+            scenario,
             use_milp
-    )
+        )
         
     if run:
 
@@ -155,30 +189,11 @@ with st.sidebar:
                 c_rate,
                 c_deg,
                 p_max,
-                 dt,
+                dt,
+                scenario,
                 use_milp
         )
 
-# -------------------------------------------------
-# POKRETANJE MODELA
-# -------------------------------------------------
-
-if run:
-
-    with st.spinner("Pokrećem optimizaciju..."):
-
-        st.session_state["results"] = run_model(
-            eta_pv,
-            p_nom_pv,
-            soc0,
-            e_max,
-            eta,
-            c_rate,
-            c_deg,
-            p_max,
-            dt,
-            use_milp
-        )
 
 # -------------------------------------------------
 # PRIKAZ REZULTATA
@@ -220,15 +235,41 @@ with tab_results:
             f"{results['soc'][-1]:.2f}"
         )
 
-        c3.metric(
-            "Maksimalna PV snaga",
-            f"{max(results['pv']):.2f} kW"
-        )
+        if scenario=="PV + baterija":
 
-        c4.metric(
-            "Ukupna PV energija",
-            f"{sum(results['pv']):.2f} kWh"
-        )
+            c3.metric(
+
+                "Maksimalna PV snaga",
+
+                f"{max(results['pv']):.2f} kW"
+
+            )
+
+            c4.metric(
+
+                "Ukupna PV energija",
+
+                f"{sum(results['pv']):.2f} kWh"
+
+            )
+
+        else:
+
+            c3.metric(
+
+                "Maksimalna snaga punjenja",
+
+                f"{max(results['p_charge']):.2f} kW"
+
+            )
+
+            c4.metric(
+
+                "Ukupna energija punjenja",
+
+                f"{sum(results['p_charge']):.2f} kWh"
+
+            )
         
         c5, c6, c7 = st.columns(3)
         
@@ -257,10 +298,19 @@ with tab_results:
 
         with left:
 
-            st.plotly_chart(
-                plot_soc(results["soc"]),
-                use_container_width=True
-            )
+            if scenario == "PV + baterija":
+
+                st.plotly_chart(
+                    plot_soc_pv(results["soc"]),
+                    use_container_width=True
+                )
+
+            else:
+
+                st.plotly_chart(
+                    plot_soc_grid(results["soc"]),
+                    use_container_width=True
+                )
 
             st.plotly_chart(
                 plot_prices(results["prices"]),
@@ -269,23 +319,49 @@ with tab_results:
 
         with right:
 
-            st.plotly_chart(
-                plot_pv(results["pv"]),
-                use_container_width=True
-            )
+            if scenario == "PV + baterija":
+
+                st.plotly_chart(
+                    plot_pv(results["pv"]),
+                    use_container_width=True
+                )
+
+                st.plotly_chart(
+                    plot_power_pv(
+                        results["p_charge"],
+                        results["p_discharge"]
+                    ),
+                    use_container_width=True
+                )
+
+            else:
+
+                st.plotly_chart(
+                    plot_power_grid(
+                        results["p_charge"],
+                        results["p_discharge"]
+                    ),
+                    use_container_width=True
+                )
+
+        if scenario == "PV + baterija":
 
             st.plotly_chart(
-                plot_power(
-                    results["p_charge"],
-                    results["p_discharge"]
-                ),
-                use_container_width=True
-            )
-
-        st.plotly_chart(
-            plot_costs(results["hourly_costs"]),
+                plot_costs_pv(
+                    results["hourly_costs"]
+            ),
             use_container_width=True
-        )
+            )
+
+        else:
+
+            st.plotly_chart(
+                plot_costs(
+                    results["charge_costs"],
+                    results["discharge_benefits"]
+                ),
+            use_container_width=True
+            )
 
         st.divider()
 
@@ -309,6 +385,17 @@ with tab_results:
                 f"Procijenjeni dnevni trošak "
                 f"**{cost:.2f} €**."
             )
+            
+        if scenario == "PV + baterija":
+
+            pv_text = (
+                f"Ukupna proizvedena energija iz fotonaponske elektrane iznosi "
+                f"**{sum(results['pv']):.2f} kWh**."
+            )
+
+        else:
+
+            pv_text = ""
 
         st.markdown(f"""
         Najniža tržišna cijena iznosila je **{min_price:.2f} €/MWh**
@@ -316,12 +403,12 @@ with tab_results:
 
         Najviša tržišna cijena iznosila je **{max_price:.2f} €/MWh**
         u **{max_hour:02d}:00 h**.
-
-        Ukupna proizvedena energija iz fotonaponske elektrane iznosi
-        **{sum(results["pv"]):.2f} kWh**.
         
-        {economic_result}"""
-        )
+        {pv_text}
+        {economic_result}
+        """)
+
+        
 
     
     # -------------------------------------------------
@@ -330,19 +417,49 @@ with tab_results:
 
         st.subheader("Rezultati po satima")
 
-        df = pd.DataFrame({
+        if scenario == "PV + baterija":
+
+            df = pd.DataFrame({
 
             "Razdoblje": [
                 f"{h:02d}:00 - {(h+1)%24:02d}:00"
                 for h in range(24)
             ],
+
             "PV [kW]": results["pv"],
+
             "Cijena [€/MWh]": results["prices"],
+
             "Punjenje [kW]": results["p_charge"],
+
             "Pražnjenje [kW]": results["p_discharge"],
+
             "SOC": results["soc"][:-1],
-            "Trošak [€]": results["hourly_costs"]
+
+            "Ušteda [€]": [abs(x) if x < 0 else 0 for x in results["hourly_costs"]]
+
         })
+
+        else:
+
+            df = pd.DataFrame({
+
+            "Razdoblje": [
+                f"{h:02d}:00 - {(h+1)%24:02d}:00"
+                for h in range(24)
+            ],
+
+            "Cijena [€/MWh]": results["prices"],
+
+            "Punjenje [kW]": results["p_charge"],
+
+            "Pražnjenje [kW]": results["p_discharge"],
+
+            "SOC": results["soc"][:-1],
+
+            "Trošak [€]": results["hourly_costs"],
+
+            })
 
         df = df.round(3)
 
@@ -430,6 +547,10 @@ with tab_results:
 """
         )
         
+# -------------------------------------------------
+# TAB O MATEMATIČKOM MODELU
+# -------------------------------------------------
+
 
 with tab_model:
 
@@ -437,9 +558,17 @@ with tab_model:
 
     st.markdown("""
 Optimizacija rada baterijskog spremnika formulirana je kao problem
-mješovitog cjelobrojnog linearnog programiranja (MILP). Cilj optimizacije
-je minimizirati ukupni trošak rada baterijskog spremnika uz uvažavanje
-troška degradacije baterije i svih fizikalnih ograničenja sustava.
+mješovitog cjelobrojnog linearnog programiranja (MILP). Model podržava
+dva scenarija rada:
+
+- **PV + baterija** – baterija se puni isključivo iz fotonaponske elektrane te se
+  prazni u satima viših tržišnih cijena električne energije.
+
+- **Baterija spojena na mrežu** – baterija se puni iz elektroenergetske mreže u
+  te se prazni radi ostvarivanja ekonomske koristi
+  uzimajući u obzir tržišne cijene električne energije.
+
+U oba scenarija uvažena su fizikalna ograničenja baterije i trošak degradacije.
 """)
 
     st.divider()
@@ -447,38 +576,74 @@ troška degradacije baterije i svih fizikalnih ograničenja sustava.
     # -------------------------------------------------
     # FUNKCIJA CILJA
     # -------------------------------------------------
-    
+
     with st.expander(
-        "Ciljna funkcija",
+        "Funkcija cilja",
         expanded=True
     ):
 
+        st.markdown("### Scenarij 1 – PV + baterija")
+
         st.latex(r"""
-\min f(x)=
-\sum_{t=1}^{24}
-c(t)\left(
-P_{ch}(t)-P_{dis}(t)
-\right)\Delta t
-+
-c_{deg}
+\min
 \sum_{t=1}^{24}
 \left(
+c_{deg}
+\left(
 P_{ch}(t)+P_{dis}(t)
-\right)\Delta t
+\right)
+-
+c(t)P_{dis}(t)
+\right)
+\Delta t
+""")
+
+        st.markdown("""
+Punjenje baterije odvija se isključivo iz fotonaponske elektrane te ne
+predstavlja trošak kupnje električne energije iz mreže. Funkcija cilja
+minimizira trošak degradacije baterije i minimizira ukupni trošak rada 
+baterije, pri čemu se ostvaruje ekonomska korist korištenjem prethodno 
+pohranjene energije u satima viših tržišnih cijena."
+""")
+
+        st.markdown("### Scenarij 2 – Baterija spojena na mrežu")
+
+        st.latex(r"""
+\min
+\sum_{t=1}^{24}
+\left(
+c(t)
+\left(
+P_{ch}(t)-P_{dis}(t)
+\right)
++
+c_{deg}
+\left(
+P_{ch}(t)+P_{dis}(t)
+\right)
+\right)
+\Delta t
+""")
+
+        st.markdown("""
+U ovom scenariju baterija kupuje električnu energiju iz mreže u satima
+nižih tržišnih cijena te se prazni pri višim cijenama radi ostvarivanja
+ekonomske koristi. U funkciju cilja uključen je i trošak degradacije
+baterije.
 """)
 
         st.markdown("""
 gdje je:
 
-- **f(x)** – ukupni trošak sustava [€]
-
 - **c(t)** – cijena električne energije u vremenskom koraku *t* [€/kWh]
+
+- **Pch(t)** – snaga punjenja baterije [kW]
+
+- **Pdis(t)** – snaga pražnjenja baterije [kW]
 
 - **Δt** – trajanje vremenskog koraka [h]
 
-- **c₍deg₎** – koeficijent troška degradacije baterije [€/kWh]
-
-- **Pch(t)+Pdis(t)** – aproksimacija ukupne prenesene energije kroz bateriju.
+- **cdeg** – koeficijent troška degradacije baterije [€/kWh]
 """)
 
     st.divider()
@@ -490,13 +655,13 @@ gdje je:
     with st.expander(
         "Jednadžba promjene stanja napunjenosti baterije"
     ):
-        
+
         st.latex(r"""
 SOC(k+1)=SOC(k)+
 \left(
 \eta_{ch}P_{ch}(k)
 -
-\frac{1}{\eta_{dis}}P_{dis}(k)
+\frac{P_{dis}(k)}{\eta_{dis}}
 \right)
 \frac{\Delta t}{E_{max}}
 """)
@@ -504,11 +669,13 @@ SOC(k+1)=SOC(k)+
         st.markdown("""
 gdje su:
 
-- **Pch(k)** ≥ 0 i **Pdis(k)** ≥ 0 snage punjenja i pražnjenja baterije u vremenskom koraku *k*
+- **ηch** – učinkovitost punjenja baterije
 
-- **ηch** i **ηdis** učinkovitosti punjenja i pražnjenja baterije
+- **ηdis** – učinkovitost pražnjenja baterije
 
-- **SOC₀** početno stanje napunjenosti baterije.
+- **Emax** – nazivni kapacitet baterije [kWh]
+
+- **SOC₀** – početno stanje napunjenosti baterije.
 """)
 
     st.divider()
@@ -532,109 +699,173 @@ SOC_{max}
 """)
 
         st.markdown("""
-Ovo ograničenje sprječava prekomjerno punjenje i duboko pražnjenje
-baterije. U modelu se koristi raspon od **0.2 do 0.9** kako bi se
-smanjila degradacija baterije.
+SOC baterije ograničen je na raspon od **0.2 do 0.9**
+radi smanjenja degradacije i produljenja životnog vijeka baterije.
 """)
 
         st.markdown("### Ograničenje snage")
 
         st.latex(r"""
-0\le P_{ch}(k)\le P_{ch}^{max}
+0\le P_{ch}(k)\le P_{limit}
 """)
 
         st.latex(r"""
-0\le P_{dis}(k)\le P_{dis}^{max}
+0\le P_{dis}(k)\le P_{limit}
 """)
 
         st.markdown("""
-Pretpostavlja se:
-
+Parametar **Pmax** predstavlja najveću dopuštenu priključnu snagu sustava
+koju korisnik definira kao ulazni podatak modela.
 """)
+
+        st.markdown("### Tehničko ograničenje baterije")
 
         st.latex(r"""
-P_{ch}^{max}
+P_{bat}^{max}
 =
-P_{dis}^{max}
-=
-P_{max}
-""")
-
-        st.markdown("""
-Maksimalna snaga dodatno je ograničena priključnom snagom mreže.
-""")
-
-        st.latex(r"""
-P_{max}
-\le
-P_{conn}^{max}
-""")
-
-        st.markdown("### Maksimalna snaga baterije")
-
-        st.latex(r"""
-P_{max}
-=
-C_{rate}
-\cdot
-E_{max}
+C_{rate}\cdot E_{max}
 """)
 
         st.markdown("""
 gdje su:
 
-- **Pmax** – maksimalna snaga punjenja i pražnjenja [kW]
+- **Pbatmax** – najveća tehnički dopuštena snaga baterije [kW]
 
 - **Crate** – C-rate baterije [h⁻¹]
 
-- **Emax** – kapacitet baterije [kWh]
+- **Emax** – nazivni kapacitet baterije [kWh]
 """)
 
         st.markdown("""
-Primjer:
-
-Ako je
-
-- **Crate = 0.5**
-
-- **Emax = 200 kWh**
-
-tada je maksimalna snaga
-
-**Pmax = 100 kW**.
+U implementaciji se koristi ograničenje:
 """)
 
-        st.markdown("### Komplementarnost")
+        st.latex(r"""
+P_{limit}
+=
+\min
+\left(
+P_{max},
+P_{bat}^{max}
+\right)
+""")
 
         st.markdown("""
-Kako bi se spriječilo istodobno punjenje i pražnjenje baterije,
-uvodi se uvjet komplementarnosti:
+Na taj način maksimalna dopuštena snaga punjenja i pražnjenja određena je
+manjom vrijednošću između korisnički zadane priključne snage sustava i
+tehničkog ograničenja baterije.
+""")
+
+        st.markdown("### Završno stanje napunjenosti")
+
+        st.latex(r"""
+SOC_{24}\ge SOC_{0}
+""")
+
+        st.markdown("""
+Na kraju optimizacijskog razdoblja stanje napunjenosti baterije mora biti
+najmanje jednako početnom stanju napunjenosti.
+""")
+
+        st.markdown("### Zabrana istodobnog punjenja i pražnjenja")
+
+        st.markdown("""
+U heurističkoj simulaciji uvjet da baterija ne može istodobno puniti i
+pražniti može se zapisati kao:
 """)
 
         st.latex(r"""
 P_{ch}(k)\cdot P_{dis}(k)=0
 """)
 
+        st.markdown("""
+U MILP formulaciji isti je uvjet implementiran pomoću binarne varijable:
+""")
+
+        st.latex(r"""
+P_{ch}(k)\le P_{limit}\,u(k)
+""")
+
+        st.latex(r"""
+P_{dis}(k)\le P_{limit}\left(1-u(k)\right)
+""")
+
+        st.latex(r"""
+u(k)\in\{0,1\}
+""")
+
+        st.markdown("""
+gdje je **u(k)** binarna varijabla koja određuje način rada baterije.
+
+- **u(k)=1** → dopušteno je punjenje baterije.
+- **u(k)=0** → dopušteno je pražnjenje baterije.
+
+Na taj način u svakom vremenskom koraku može biti aktivan samo jedan način rada baterije.
+""")
+
+        st.markdown("### Dodatno ograničenje za PV scenarij")
+
+        st.latex(r"""
+P_{ch}(k)\le P_{PV}(k)
+""")
+
+        st.markdown("""
+U scenariju **PV + baterija** snaga punjenja ograničena je raspoloživom
+proizvodnjom fotonaponske elektrane.
+""")
+        
+        st.markdown("### Heuristički algoritam")
+
+        st.markdown("""
+Kao alternativa MILP optimizaciji implementiran je heuristički algoritam
+temeljen na unaprijed definiranim pravilima odlučivanja.
+Za razliku od MILP pristupa, heuristički algoritam ne rješava optimizacijski 
+problem niti traži globalno optimalno rješenje, već odluke o punjenju i pražnjenju 
+donosi prema unaprijed definiranim pravilima.
+
+- U scenariju **PV + baterija** baterija se puni isključivo iz raspoložive
+  proizvodnje fotonaponske elektrane, dok se pražnjenje provodi tijekom
+  četiri sata s najvišom tržišnom cijenom električne energije.
+
+- U scenariju **Baterija spojena na mrežu** punjenje se provodi tijekom
+  četiri sata s najnižom cijenom električne energije, dok se pražnjenje
+  provodi tijekom četiri sata s najvišom cijenom.
+
+Tijekom simulacije heuristički algoritam poštuje ista fizikalna ograničenja
+kao i MILP model, uključujući ograničenja stanja napunjenosti baterije,
+maksimalne snage punjenja i pražnjenja te uvjet da završno stanje
+napunjenosti baterije ne smije biti manje od početnog.
+
+Punjenje i pražnjenje dodatno su ograničeni raspoloživim kapacitetom baterije, 
+maksimalnom dopuštenom snagom punjenja i pražnjenja te 
+uvjetom da završno stanje napunjenosti baterije ne bude manje od početnog.
+""")
+
     st.divider()
 
-    st.info(
-        """
+    st.info("""
 Model je implementiran kao problem mješovitog cjelobrojnog linearnog
-programiranja (MILP), a optimizacija se rješava pomoću biblioteke
-PuLP i CBC solvera.
-"""
-    )
+programiranja (MILP), pri čemu se optimizacija rješava pomoću biblioteke
+PuLP i CBC solvera. Kao referentna metoda implementiran je i heuristički
+algoritam koji koristi unaprijed definirana pravila punjenja i pražnjenja
+baterije bez rješavanja optimizacijskog problema. Usporedbom rezultata
+obaju pristupa moguće je procijeniti prednosti optimizacijskog modela u
+odnosu na jednostavnu heurističku strategiju upravljanja baterijom.
+""")
     
-    
-with tab_about:
+    # -------------------------------------------------
+    # TAB O APLIKACIJI 
+    #------------------------------------------------
+
+with tab_about: 
 
     st.header("O aplikaciji")
 
     st.markdown("""
-Aplikacija omogućuje optimizaciju rada baterijskog spremnika
-spojenog na fotonaponsku elektranu. Model predstavlja linearni optimizacijski problem (MILP)
-kojim se određuje optimalno punjenje i pražnjenje
-baterijskog spremnika uz minimizaciju ukupnog troška.
+Aplikacija omogućuje optimizaciju rada baterijskog 
+spremnika u dva scenarija: baterija spojena na 
+fotonaponsku elektranu ili baterija spojena 
+izravno na elektroenergetsku mrežu.
 
 Korištene tehnologije
 

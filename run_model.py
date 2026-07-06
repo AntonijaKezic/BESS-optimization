@@ -7,9 +7,17 @@ from models.pv_model import pv_output
 from simulation.runner import simulate_battery
 from optimization.milp import optimize_battery
 
+from optimization.objective_function_pv import objective_function_pv
 from optimization.objective_function import objective_function
 from optimization.costs import hourly_cost
+from optimization.costs_pv import hourly_cost_pv
 
+from optimization.economic_effect import hourly_economic_effect
+
+from optimization.costs import (
+    hourly_cost,
+    hourly_cost_components
+)
 
 def run_model(
     eta_pv,
@@ -21,6 +29,7 @@ def run_model(
     c_deg,
     p_max,
     dt,
+    scenario,
     use_milp=True
 ):
 
@@ -42,14 +51,20 @@ def run_model(
     # PV proizvodnja
     # -------------------
 
-    p_pv = [
-        pv_output(
-            r,
-            eta_pv,
-            p_nom_pv
-        )
-        for r in radiation
-    ]
+    if scenario == "PV + baterija":
+
+        p_pv = [
+            pv_output(
+                r,
+                eta_pv,
+                p_nom_pv
+            )
+            for r in radiation
+        ]
+
+    else:
+
+        p_pv = [0.0] * len(radiation)
 
     # -------------------
     # TESTNE CIJENE
@@ -108,7 +123,8 @@ def run_model(
             p_max,
             c_rate,
             c_deg,
-            dt
+            dt,
+            scenario
         )
 
     else:
@@ -116,33 +132,76 @@ def run_model(
         soc, p_charge, p_discharge = simulate_battery(
             soc0,
             p_pv,
+            prices,
             p_max,
             eta_ch,
             eta_dis,
             dt,
             e_max,
-            c_rate
+            c_rate,
+            scenario
         )
 
     # -------------------
     # Troškovi
     # -------------------
 
-    total_cost = objective_function(
-        prices,
-        p_charge,
-        p_discharge,
-        dt,
-        c_deg
-    )
+    economic_effect = None 
+    
+    charge_costs = None
+    discharge_benefits = None
 
-    hourly_costs = hourly_cost(
+    if scenario=="PV + baterija":
+
+        total_cost=objective_function_pv(
         prices,
         p_charge,
         p_discharge,
         dt,
         c_deg
-    )
+        )
+        
+        hourly_costs = hourly_cost_pv(
+            prices,
+            p_charge,
+            p_discharge,
+            dt,
+            c_deg
+        )
+        
+    else:
+
+        total_cost=objective_function(
+            prices,
+            p_charge,
+            p_discharge,
+            dt,
+            c_deg
+        )
+        
+        hourly_costs = hourly_cost(
+            prices,
+            p_charge,
+            p_discharge,
+            dt,
+            c_deg
+        )
+        
+        charge_costs, discharge_benefits = hourly_cost_components(
+            prices,
+            p_charge,
+            p_discharge,
+            dt,
+            c_deg
+        )
+
+        economic_effect = hourly_economic_effect(
+            prices,
+            p_charge,
+            p_discharge,
+            dt,
+            c_deg
+        )
 
     # -------------------
     # Rezultati
@@ -157,5 +216,8 @@ def run_model(
         "p_charge": p_charge,
         "p_discharge": p_discharge,
         "cost": total_cost,
-        "hourly_costs": hourly_costs
+        "hourly_costs": hourly_costs,
+        "economic_effect": economic_effect,
+        "charge_costs": charge_costs,
+        "discharge_benefits": discharge_benefits,
     }

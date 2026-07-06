@@ -26,7 +26,8 @@ def optimize_battery(
     p_max,
     c_rate,
     c_deg,
-    dt
+    dt,
+    scenario
 
 ):
 
@@ -116,10 +117,11 @@ def optimize_battery(
         )
 
         # Punjenje samo iz PV
-        problem += (
-            p_charge[t] <= p_pv[t],    #Punjenje baterije ograničeno je dostupnom PV proizvodnjom
-            f"PV_limit_{t}"
-        )
+        if scenario == "PV + baterija":
+            problem += (
+                p_charge[t] <= p_pv[t],    #Punjenje baterije ograničeno je dostupnom PV proizvodnjom
+                f"PV_limit_{t}"
+            )
 
         # Punjenje ili pražnjenje - istovremeno nije dopusteno
         problem += (
@@ -137,27 +139,56 @@ def optimize_battery(
         )
 
     # -------------------
-    # FUNKCIJA CILJA
-    # -------------------
+# FUNKCIJA CILJA
+# -------------------
 
-    problem += lpSum(
+    if scenario == "PV + baterija":
 
-        (
-            (prices[t] / 1000)
-            * (p_charge[t] - p_discharge[t])
-            * dt
+        problem += lpSum(
 
-            +
+            (
 
-            c_deg
-            * (p_charge[t] + p_discharge[t])
-            * dt
+                c_deg
+                *
+                (p_charge[t] + p_discharge[t])
+                * dt
 
-        )
+                -
 
-        for t in hours
+                (prices[t] / 1000)
+                *
+                p_discharge[t]
+                * dt
 
-    ), "Total_Cost"
+            )
+
+            for t in hours
+
+        ), "Total_Cost"
+
+    else:
+
+        problem += lpSum(
+
+            (
+
+                (prices[t] / 1000)
+                *
+                (p_charge[t] - p_discharge[t])
+                * dt
+
+                +
+
+                c_deg
+                *
+                (p_charge[t] + p_discharge[t])
+                * dt
+
+            )
+
+            for t in hours
+
+        ), "Total_Cost"
 
     # -------------------
     # RJEŠAVANJE
