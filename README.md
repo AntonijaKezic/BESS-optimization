@@ -1,49 +1,51 @@
-# BESS-optimization
-Battery Energy Storage System optimization using MILP, PV forecasting, Open-Meteo and ENTSO-E day-ahead electricity prices.
-
 # BESS Optimization
 
-A Streamlit application for optimizing the operation of a Battery Energy Storage System (BESS) coupled with a photovoltaic (PV) power plant.
+Battery Energy Storage System (BESS) optimization using Mixed-Integer Linear Programming (MILP), photovoltaic (PV) generation forecasting, Open-Meteo weather forecasts and ENTSO-E day-ahead electricity prices.
 
-The optimization is formulated as a Mixed-Integer Linear Programming (MILP) problem and uses:
-
-- Open-Meteo API for solar radiation forecast
-- ENTSO-E Transparency Platform for day-ahead electricity prices
-- Battery operation constraints
-- Interactive visualization of optimization results
+The project includes an interactive Streamlit application for analyzing battery operation under different operating scenarios and comparing MILP optimization with a heuristic control strategy.
 
 ---
 
 ## Features
 
-- Automatic retrieval of weather forecast
-- Automatic retrieval of ENTSO-E day-ahead prices
-- PV production estimation
-- MILP battery optimization
-- State of Charge (SOC) simulation
+- Two operating scenarios:
+  - **PV + Battery**
+  - **Grid-connected Battery**
+- MILP-based battery optimization
+- Heuristic battery control algorithm
+- Automatic retrieval of day-ahead electricity prices (ENTSO-E)
+- Automatic retrieval of solar radiation forecast (Open-Meteo)
+- Photovoltaic power estimation
+- Battery degradation cost modelling
+- Battery State of Charge (SOC) simulation
 - Interactive Streamlit dashboard
-- CSV and Excel export
 - Mathematical model documentation
+- CSV and Excel export of optimization results
 
 ---
 
 ## Mathematical model
 
-The optimization minimizes the total operating cost.
+The battery scheduling problem is formulated as a Mixed-Integer Linear Programming (MILP) optimization problem.
 
-Subject to:
+The optimization minimizes the operating cost while considering:
 
-- Battery SOC dynamics
-- SOC limits
-- Charging/discharging power limits
-- Battery capacity constraints
-- Complementarity constraint
+- electricity market prices,
+- battery degradation cost,
+- battery charging and discharging efficiencies,
+- State of Charge (SOC) limits,
+- charging/discharging power limits,
+- battery capacity,
+- final SOC constraint,
+- complementarity constraint using binary decision variables.
+
+As a reference method, the application also includes a heuristic control algorithm based on predefined charging and discharging rules.
 
 ---
 
 ## Project structure
 
-```
+```text
 BESS_optimization/
 │
 ├── api/
@@ -55,12 +57,16 @@ BESS_optimization/
 │   └── plots.py
 │
 ├── models/
+│   ├── battery.py
 │   └── pv_model.py
 │
 ├── optimization/
 │   ├── milp.py
+│   ├── objective_function.py
+│   ├── objective_function_pv.py
 │   ├── costs.py
-│   └── objective_function.py
+│   ├── costs_pv.py
+│   └── economic_effect.py
 │
 ├── simulation/
 │   └── runner.py
@@ -74,19 +80,19 @@ BESS_optimization/
 
 ## Installation
 
-Clone the repository
+Clone the repository:
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/BESS_optimization.git
 ```
 
-Install dependencies
+Install the required dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Run the application
+Run the application:
 
 ```bash
 streamlit run gui/app.py
@@ -99,8 +105,10 @@ streamlit run gui/app.py
 - Python
 - Streamlit
 - PuLP
+- CBC Solver
 - Plotly
 - Pandas
+- OpenPyXL
 - Open-Meteo API
 - ENTSO-E Transparency Platform
 
@@ -108,14 +116,28 @@ streamlit run gui/app.py
 
 ## Data sources
 
-- Open-Meteo API
-- ENTSO-E Transparency Platform
+- **Open-Meteo API** – hourly solar radiation forecast
+- **ENTSO-E Transparency Platform** – day-ahead electricity market prices
+
+---
+
+## Application overview
+
+The application allows users to:
+
+- configure battery and PV system parameters,
+- select the operating scenario,
+- compare MILP optimization with a heuristic approach,
+- analyse charging/discharging schedules,
+- monitor battery SOC,
+- evaluate hourly operating costs and economic benefits,
+- export optimization results.
 
 ---
 
 ## Author
 
-Antonija Kežić
+**Antonija Kežić**
 
 Bachelor Thesis
 
