@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from io import BytesIO
+from datetime import datetime, date, timedelta
 
 from openpyxl.styles import Font
 
@@ -14,6 +15,14 @@ if str(ROOT) not in sys.path:
 
 from run_model import run_model
 
+from models.load_profile import (
+    PROFILE_NAMES,
+    DEFAULT_PROFILE
+)
+
+from models.solar_reference import clearsky_daily_kwh
+from api.openmeteo_api import get_monthly_daily_totals, LATITUDE
+
 from plots import (
     plot_soc_pv,
     plot_soc_grid,
@@ -22,8 +31,33 @@ from plots import (
     plot_power_pv,
     plot_power_grid,
     plot_costs,
-    plot_costs_pv
+    plot_costs_pv,
+    plot_energy_balance,
+    plot_month_heatmap
 )
+
+import calendar
+
+
+@st.cache_data(show_spinner="Dohvaćam mjesečne podatke...")
+def cached_monthly_totals(year, month):
+    return get_monthly_daily_totals(year, month)
+
+
+def clearsky_for_month(year, month):
+    """Vraca dict {dan: idealna_dnevna_kwh} za sve dane u mjesecu."""
+
+    _, days_in_month = calendar.monthrange(year, month)
+
+    result = {}
+
+    for d in range(1, days_in_month + 1):
+
+        doy = date(year, month, d).timetuple().tm_yday
+
+        result[d] = clearsky_daily_kwh(doy, LATITUDE)
+
+    return result
 
 # -------------------------------------------------
 # POSTAVKE STRANICE
@@ -71,23 +105,121 @@ with st.sidebar:
         ]
     )
 
-    if scenario == "PV + baterija":
+    data_mode = st.radio(
+        "Izvor podataka",
+        ["Sutra (prognoza)", "Povijesni datum"],
+        help=
+        "Sutra: prognoza Open-Meteo i day-ahead cijene za sutra. "
+        "Povijesni datum: ERA5 reanaliza (Open-Meteo Archive) i "
+        "day-ahead cijene za odabrani datum."
+    )
 
-        eta_pv = st.slider(
-            "Učinkovitost PV [%]",
+    if data_mode == "Povijesni datum":
 
-            0.10,
-
-            0.25,
-
-            0.20,
-
-            0.01
+        historical_date = st.date_input(
+            "Datum",
+            value=(datetime.now() - timedelta(days=14)).date(),
+            min_value=date(2016, 1, 1),
+            max_value=(datetime.now() - timedelta(days=3)).date(),
+            help=
+            "Open-Meteo Archive ima oko 3 dana kašnjenja. "
+            "ENTSO-E cijene za HR dostupne su od 2016."
         )
 
+        # -----------------------------------------
+        # Kalendarski heatmap dozracene energije
+        # za mjesec odabranog datuma. Boja pokazuje
+        # koji su dani bili suncani (zuto) i oblacni (sivo).
+        # -----------------------------------------
+
+        _daily = cached_monthly_totals(
+            historical_date.year,
+            historical_date.month
+        )
+
+        _clearsky = clearsky_for_month(
+            historical_date.year,
+            historical_date.month
+        )
+
+        if _daily:
+
+            st.plotly_chart(
+                plot_month_heatmap(
+                    historical_date.year,
+                    historical_date.month,
+                    _daily,
+                    _clearsky
+                ),
+                use_container_width=True,
+                config={"displayModeBar": False}
+            )
+
+            sorted_days = sorted(_daily.items(), key=lambda kv: kv[1])
+            worst_day, worst_kwh = sorted_days[0]
+            best_day, best_kwh = sorted_days[-1]
+            avg = sum(_daily.values()) / len(_daily)
+
+            st.caption(
+                f"☀️ Najsunčaniji: **{best_day:02d}.** "
+                f"({best_kwh:.2f} kWh/m²) &nbsp;&nbsp; "
+                f"☁️ Najoblačniji: **{worst_day:02d}.** "
+                f"({worst_kwh:.2f} kWh/m²) &nbsp;&nbsp; "
+                f"Prosjek: **{avg:.2f} kWh/m²/dan**",
+                unsafe_allow_html=True
+            )
+
+        else:
+
+            st.caption(
+                "_Nema dostupnih podataka za odabrani mjesec._"
+            )
+
+    else:
+
+        historical_date = None
+
+    if scenario == "PV + baterija":
+
         p_nom_pv = st.number_input(
-            "Nazivna snaga PV [kW]",
-            value=10.0
+            "Nazivna snaga PV [kWp]",
+            value=10.0,
+            help=
+            "Nazivna DC snaga PV instalacije pri STC "
+            "(1000 W/m², 25 °C) - vršna snaga koja se "
+            "naznačuje na tablici uređaja."
+        )
+
+        eta_pv = st.slider(
+            "Derating sustava [-]",
+
+            0.80,
+
+            0.95,
+
+            0.85,
+
+            0.01,
+
+            help=
+            "Ukupni gubici sustava izvan STC: temperatura "
+            "panela, kablovi, inverter, prljavština. Tipično 0.80-0.90."
+        )
+
+        daily_load_kwh = st.number_input(
+            "Dnevna potrošnja [kWh]",
+            value=30.0,
+            min_value=0.0,
+            step=1.0
+        )
+
+        profile_name = st.selectbox(
+            "Profil potrošnje",
+            PROFILE_NAMES,
+            index=PROFILE_NAMES.index(DEFAULT_PROFILE),
+            help=
+            "Oblik krivulje dnevne potrošnje. Predlošci se "
+            "automatski skaliraju na zadanu dnevnu potrošnju."
         )
 
     else:
@@ -95,6 +227,10 @@ with st.sidebar:
         eta_pv = None
 
         p_nom_pv = None
+
+        daily_load_kwh = None
+
+        profile_name = None
 
     soc0 = st.slider(
         "Početni SOC",
@@ -136,7 +272,11 @@ with st.sidebar:
 
     dt = st.number_input(
         "Korak simulacije [h]",
-        value=1.0
+        value=0.25,
+        step=0.25,
+        help=
+        "Trajanje jednog vremenskog koraka. 0.25 h = 15 min "
+        "raster (96 koraka/dan), 1.0 h = satni raster (24 koraka/dan)."
     )
 
     use_milp = st.checkbox(
@@ -158,9 +298,11 @@ with st.sidebar:
     if (
     "results" not in st.session_state
     or st.session_state.get("scenario") != scenario
+    or st.session_state.get("data_mode") != data_mode
     ):
 
         st.session_state["scenario"] = scenario
+        st.session_state["data_mode"] = data_mode
 
         st.session_state["results"] = run_model(
             eta_pv,
@@ -173,9 +315,12 @@ with st.sidebar:
             p_max,
             dt,
             scenario,
-            use_milp
+            use_milp,
+            daily_load_kwh,
+            profile_name,
+            historical_date
         )
-        
+
     if run:
 
         with st.spinner("Pokrećem optimizaciju..."):
@@ -191,7 +336,10 @@ with st.sidebar:
                 p_max,
                 dt,
                 scenario,
-                use_milp
+                use_milp,
+                daily_load_kwh,
+                profile_name,
+                historical_date
         )
 
 
@@ -204,6 +352,11 @@ with tab_results:
     if "results" in st.session_state:
 
         results = st.session_state["results"]
+
+        st.caption(
+            f"📅 Datum optimizacije: **{results['optimization_date']}** "
+            f"({'povijesni podaci' if results['price_day'] == 'historical' else 'prognoza'})"
+        )
 
         if results["price_day"] == "today":
             st.warning(
@@ -235,6 +388,8 @@ with tab_results:
             f"{results['soc'][-1]:.2f}"
         )
 
+        step_dt = results.get("dt", 0.25)
+
         if scenario=="PV + baterija":
 
             c3.metric(
@@ -249,7 +404,7 @@ with tab_results:
 
                 "Ukupna PV energija",
 
-                f"{sum(results['pv']):.2f} kWh"
+                f"{sum(results['pv']) * step_dt:.2f} kWh"
 
             )
 
@@ -267,7 +422,7 @@ with tab_results:
 
                 "Ukupna energija punjenja",
 
-                f"{sum(results['p_charge']):.2f} kWh"
+                f"{sum(results['p_charge']) * step_dt:.2f} kWh"
 
             )
         
@@ -275,14 +430,14 @@ with tab_results:
         
         c5.metric(
             "Prosječna cijena",
-            f"{sum(results['prices'])/24:.2f} €/MWh"
+            f"{sum(results['prices']) / len(results['prices']):.2f} €/MWh"
         )
-        
+
         c6.metric(
             "Minimalna cijena",
             f"{min(results['prices']):.2f} €/MWh"
         )
-        
+
         c7.metric(
             "Maksimalna cijena",
             f"{max(results['prices']):.2f} €/MWh"
@@ -347,10 +502,20 @@ with tab_results:
         if scenario == "PV + baterija":
 
             st.plotly_chart(
+                plot_energy_balance(
+                    results["pv_to_load"],
+                    results["p_discharge"],
+                    results["grid_imp"],
+                    results["p_load"]
+                ),
+                use_container_width=True
+            )
+
+            st.plotly_chart(
                 plot_costs_pv(
-                    results["hourly_costs"]
-            ),
-            use_container_width=True
+                    results["hourly_savings"]
+                ),
+                use_container_width=True
             )
 
         else:
@@ -370,9 +535,21 @@ with tab_results:
         min_price = min(results["prices"])
         max_price = max(results["prices"])
 
-        min_hour = results["prices"].index(min_price)
-        max_hour = results["prices"].index(max_price)
-        
+        min_idx = results["prices"].index(min_price)
+        max_idx = results["prices"].index(max_price)
+
+        sph = results.get("steps_per_hour", 4)
+        step_minutes = 60 // sph
+
+        def _fmt_slot(i):
+            return (
+                f"{(i // sph):02d}:"
+                f"{(i % sph) * step_minutes:02d}"
+            )
+
+        min_time = _fmt_slot(min_idx)
+        max_time = _fmt_slot(max_idx)
+
         cost = results["cost"]
 
         if cost < 0:
@@ -385,12 +562,12 @@ with tab_results:
                 f"Procijenjeni dnevni trošak "
                 f"**{cost:.2f} €**."
             )
-            
+
         if scenario == "PV + baterija":
 
             pv_text = (
                 f"Ukupna proizvedena energija iz fotonaponske elektrane iznosi "
-                f"**{sum(results['pv']):.2f} kWh**."
+                f"**{sum(results['pv']) * results.get('dt', 0.25):.2f} kWh**."
             )
 
         else:
@@ -399,11 +576,11 @@ with tab_results:
 
         st.markdown(f"""
         Najniža tržišna cijena iznosila je **{min_price:.2f} €/MWh**
-        u **{min_hour:02d}:00 h**.
+        u **{min_time}**.
 
         Najviša tržišna cijena iznosila je **{max_price:.2f} €/MWh**
-        u **{max_hour:02d}:00 h**.
-        
+        u **{max_time}**.
+
         {pv_text}
         {economic_result}
         """)
@@ -415,20 +592,41 @@ with tab_results:
     # TABLICA
     # -------------------------------------------------
 
-        st.subheader("Rezultati po satima")
+        st.subheader("Rezultati po vremenskim koracima")
+
+        n_slots = len(results["prices"])
+
+        sph_tbl = results.get("steps_per_hour", 4)
+        step_min = 60 // sph_tbl
+
+        def _slot_range(i):
+            start_h = i // sph_tbl
+            start_m = (i % sph_tbl) * step_min
+            end_slot = i + 1
+            end_h = (end_slot // sph_tbl) % 24
+            end_m = (end_slot % sph_tbl) * step_min
+            return (
+                f"{start_h:02d}:{start_m:02d} - "
+                f"{end_h:02d}:{end_m:02d}"
+            )
+
+        razdoblja = [_slot_range(i) for i in range(n_slots)]
 
         if scenario == "PV + baterija":
 
             df = pd.DataFrame({
 
-            "Razdoblje": [
-                f"{h:02d}:00 - {(h+1)%24:02d}:00"
-                for h in range(24)
-            ],
+            "Razdoblje": razdoblja,
 
             "PV [kW]": results["pv"],
 
+            "Potrošnja [kW]": results["p_load"],
+
             "Cijena [€/MWh]": results["prices"],
+
+            "Iz PV → potrošnja [kW]": results["pv_to_load"],
+
+            "Iz mreže [kW]": results["grid_imp"],
 
             "Punjenje [kW]": results["p_charge"],
 
@@ -436,7 +634,7 @@ with tab_results:
 
             "SOC": results["soc"][:-1],
 
-            "Ušteda [€]": [abs(x) if x < 0 else 0 for x in results["hourly_costs"]]
+            "Ušteda [€]": results["hourly_savings"]
 
         })
 
@@ -444,10 +642,7 @@ with tab_results:
 
             df = pd.DataFrame({
 
-            "Razdoblje": [
-                f"{h:02d}:00 - {(h+1)%24:02d}:00"
-                for h in range(24)
-            ],
+            "Razdoblje": razdoblja,
 
             "Cijena [€/MWh]": results["prices"],
 
@@ -561,14 +756,119 @@ Optimizacija rada baterijskog spremnika formulirana je kao problem
 mješovitog cjelobrojnog linearnog programiranja (MILP). Model podržava
 dva scenarija rada:
 
-- **PV + baterija** – baterija se puni isključivo iz fotonaponske elektrane te se
-  prazni u satima viših tržišnih cijena električne energije.
+- **PV + baterija** – kućanstvo s vlastitom PV elektranom, baterijom i
+  priključkom na mrežu. PV proizvodnja može napajati kućanstvo ili
+  puniti bateriju; baterija se prazni isključivo u kućanstvo. Kućanstvo
+  može kupovati energiju iz mreže, ali PV se ne izvozi i baterija se ne
+  prazni u mrežu. Cilj je minimizirati trošak uvoza energije iz mreže
+  uz optimalno korištenje baterije.
 
-- **Baterija spojena na mrežu** – baterija se puni iz elektroenergetske mreže u
-  te se prazni radi ostvarivanja ekonomske koristi
-  uzimajući u obzir tržišne cijene električne energije.
+- **Baterija spojena na mrežu** – baterija se puni iz elektroenergetske
+  mreže u satima nižih cijena te prazni pri višim cijenama radi
+  ostvarivanja ekonomske koristi.
 
 U oba scenarija uvažena su fizikalna ograničenja baterije i trošak degradacije.
+
+**Vremenska rezolucija.** Optimizacijsko razdoblje pokriva jedan dan
+podijeljen na *T* vremenskih koraka trajanja *Δt*. Zadano je *Δt = 0.25 h*
+(15-minutni raster, *T = 96* koraka), no korisnik može odabrati i satni
+raster (*Δt = 1 h*, *T = 24*). Sve niže navedene jednadžbe primjenjuju se
+u svakom vremenskom koraku *k ∈ {1, …, T}*.
+""")
+
+    st.divider()
+
+    # -------------------------------------------------
+    # ULAZNI PODACI MODELA
+    # -------------------------------------------------
+
+    with st.expander("Ulazni podaci modela"):
+
+        st.markdown("### Model PV proizvodnje")
+
+        st.markdown("""
+Snaga PV instalacije u svakom vremenskom koraku računa se linearnim
+skaliranjem prema Standard Test Conditions (STC):
+""")
+
+        st.latex(r"""
+P_{PV}(t)
+=
+\frac{G(t)}{1000}
+\,\eta_{sys}\,
+P_{STC}
+""")
+
+        st.markdown("""
+gdje su:
+
+- **G(t)** – kratkovalno Sunčevo zračenje [W/m²] dohvaćeno iz Open-Meteo
+  API-ja. Podržana su dva izvora ovisno o odabiru u sučelju:
+
+  * **Prognoza za sutra** – *Open-Meteo Forecast API*
+    ([api.open-meteo.com/v1/forecast](https://api.open-meteo.com/v1/forecast)),
+    numerička vremenska prognoza za sljedeći dan.
+  * **Povijesni datum** – *Open-Meteo Archive API*
+    ([archive-api.open-meteo.com/v1/archive](https://archive-api.open-meteo.com/v1/archive)),
+    ERA5 reanaliza koja pokriva razdoblje od 1940. do prije nekoliko
+    dana.
+
+  Satne vrijednosti se u oba slučaja linearno interpoliraju na *Δt*.
+
+- **P_STC** – nazivna DC snaga PV instalacije pri STC [kWp]
+  (1000 W/m², 25 °C ćelije) – korisnički ulazni podatak
+
+- **η_sys** – ukupni derating sustava (temperatura panela, kablovi,
+  inverter, prljavština), tipično 0.80–0.95 – korisnički ulazni podatak.
+
+Odabir povijesnog datuma omogućuje analizu utjecaja stvarnih vremenskih
+uvjeta (sunčani ljetni dan / oblačan zimski dan) na rad baterijskog
+sustava uz identično zadanu potrošnju i parametre baterije.
+""")
+
+        st.markdown("### Profil potrošnje (samo scenarij 1)")
+
+        st.markdown(r"""
+Dnevna potrošnja kućanstva zadaje se dvama parametrima:
+korisnik unosi **ukupnu dnevnu potrošnju $E_{dan}$ [kWh]** i odabire
+**oblik krivulje** iz fiksnog kataloga (rezidencijalni, poslovni, ravni,
+noćna smjena). Odabrani predložak $s(t)$ (satne relativne vrijednosti)
+linearno se interpolira na traženu vremensku rezoluciju i skalira tako
+da vrijedi:
+""")
+
+        st.latex(r"""
+\sum_{t=1}^{T} P_{load}(t)\,\Delta t = E_{dan}
+""")
+
+        st.markdown("""
+Time se neovisno mijenjaju iznos i oblik potrošnje, dok apsolutne
+vrijednosti unutar predloška nemaju značaj – važan je samo relativni
+oblik krivulje.
+""")
+
+        st.markdown("### Cijene električne energije")
+
+        st.markdown("""
+Day-ahead cijene *c(t)* dohvaćaju se iz *ENTSO-E Transparency Platforma*
+za područje Hrvatske (10YHR-HEP------M) u **prirodnoj rezoluciji koju
+tržište objavljuje** – PT15M (96 vrijednosti dnevno) na modernim
+tržištima, ili PT60M (24 satne vrijednosti) za starije objave. Parser
+automatski detektira rezoluciju iz XML-a (`<Period><resolution>`).
+
+Ovisno o odabiru u sučelju:
+
+- **Prognoza za sutra** – dohvaćaju se cijene za sutrašnji dan, uz
+  rezervno vraćanje na današnji dan ako sutrašnje objave još nema.
+- **Povijesni datum** – dohvaćaju se stvarne day-ahead cijene za
+  odabrani datum (dostupno od veljače 2016. kada je HR ušao u
+  jedinstveno spajanje tržišta CROPEX-HUPX-EPEX-a).
+
+Cijene se zatim prilagođavaju odabranom koraku simulacije *Δt*:
+ako je nativna rezolucija jednaka *Δt*, koriste se direktno; ako je
+nativna finija (PT15M s *Δt* = 1 h), susjedne se vrijednosti
+usrednjuju; ako je nativna grublja (PT60M s *Δt* = 0.25 h), svaka
+satna cijena ponavlja se 4 puta.
 """)
 
     st.divider()
@@ -586,31 +886,32 @@ U oba scenarija uvažena su fizikalna ograničenja baterije i trošak degradacij
 
         st.latex(r"""
 \min
-\sum_{t=1}^{24}
+\sum_{t=1}^{T}
 \left(
+c(t)\,P_{grid}(t)
++
 c_{deg}
 \left(
 P_{ch}(t)+P_{dis}(t)
 \right)
--
-c(t)P_{dis}(t)
 \right)
 \Delta t
 """)
 
         st.markdown("""
-Punjenje baterije odvija se isključivo iz fotonaponske elektrane te ne
-predstavlja trošak kupnje električne energije iz mreže. Funkcija cilja
-minimizira trošak degradacije baterije i minimizira ukupni trošak rada 
-baterije, pri čemu se ostvaruje ekonomska korist korištenjem prethodno 
-pohranjene energije u satima viših tržišnih cijena."
+Punjenje baterije odvija se isključivo iz PV proizvodnje te ne
+predstavlja trošak kupnje energije iz mreže. Baterija se prazni
+isključivo u kućanstvo, a ne u mrežu, pa nema izravnog prihoda od
+pražnjenja. Funkcija cilja minimizira trošak uvoza energije iz mreže
+i trošak degradacije baterije. Ekonomska korist nastaje neizravno –
+kroz smanjenu potrebu za uvozom u satima viših tržišnih cijena.
 """)
 
         st.markdown("### Scenarij 2 – Baterija spojena na mrežu")
 
         st.latex(r"""
 \min
-\sum_{t=1}^{24}
+\sum_{t=1}^{T}
 \left(
 c(t)
 \left(
@@ -640,6 +941,14 @@ gdje je:
 - **Pch(t)** – snaga punjenja baterije [kW]
 
 - **Pdis(t)** – snaga pražnjenja baterije [kW]
+
+- **Pgrid(t)** – snaga uvoza iz mreže *(samo scenarij 1)* [kW]
+
+- **PPV(t)** – snaga PV proizvodnje *(samo scenarij 1)* [kW]
+
+- **Pload(t)** – snaga potrošnje kućanstva *(samo scenarij 1)* [kW]
+
+- **PPV→load(t)** – snaga PV-a koja izravno napaja potrošnju *(samo scenarij 1)* [kW]
 
 - **Δt** – trajanje vremenskog koraka [h]
 
@@ -759,12 +1068,14 @@ tehničkog ograničenja baterije.
         st.markdown("### Završno stanje napunjenosti")
 
         st.latex(r"""
-SOC_{24}\ge SOC_{0}
+SOC(T)\ge SOC_{0}
 """)
 
         st.markdown("""
 Na kraju optimizacijskog razdoblja stanje napunjenosti baterije mora biti
-najmanje jednako početnom stanju napunjenosti.
+najmanje jednako početnom stanju napunjenosti. To sprječava trivijalno
+"prosipanje" baterije koje bi umjetno povećalo prividnu uštedu unutar
+jednog dana.
 """)
 
         st.markdown("### Zabrana istodobnog punjenja i pražnjenja")
@@ -803,15 +1114,35 @@ gdje je **u(k)** binarna varijabla koja određuje način rada baterije.
 Na taj način u svakom vremenskom koraku može biti aktivan samo jedan način rada baterije.
 """)
 
-        st.markdown("### Dodatno ograničenje za PV scenarij")
+        st.markdown("### Dodatna ograničenja za PV scenarij")
+
+        st.markdown("**Balans potrošnje** – potrošnja kućanstva pokriva se iz PV-a, pražnjenja baterije i uvoza iz mreže:")
 
         st.latex(r"""
-P_{ch}(k)\le P_{PV}(k)
+P_{PV\to load}(k) + P_{dis}(k) + P_{grid}(k)
+=
+P_{load}(k)
+""")
+
+        st.markdown("**Raspodjela PV-a** – PV proizvodnja može istovremeno napajati kućanstvo i puniti bateriju; višak se ne izvozi u mrežu:")
+
+        st.latex(r"""
+P_{PV\to load}(k) + P_{ch}(k) \le P_{PV}(k)
+""")
+
+        st.markdown("**Nenegativnost varijabli tokova**:")
+
+        st.latex(r"""
+P_{PV\to load}(k) \ge 0,\quad
+P_{grid}(k) \ge 0
 """)
 
         st.markdown("""
-U scenariju **PV + baterija** snaga punjenja ograničena je raspoloživom
-proizvodnjom fotonaponske elektrane.
+Budući da su sve varijable tokova nenegativne, iz balansa potrošnje
+automatski slijedi da pražnjenje baterije ne može premašiti potrebu
+kućanstva – tj. baterija ne prazni u mrežu. Slično, iz nejednakosti
+raspodjele PV-a slijedi da se višak PV-a nakon napajanja potrošnje i
+punjenja baterije jednostavno odbacuje (curtailment).
 """)
         
         st.markdown("### Heuristički algoritam")
@@ -819,26 +1150,101 @@ proizvodnjom fotonaponske elektrane.
         st.markdown("""
 Kao alternativa MILP optimizaciji implementiran je heuristički algoritam
 temeljen na unaprijed definiranim pravilima odlučivanja.
-Za razliku od MILP pristupa, heuristički algoritam ne rješava optimizacijski 
-problem niti traži globalno optimalno rješenje, već odluke o punjenju i pražnjenju 
+Za razliku od MILP pristupa, heuristički algoritam ne rješava optimizacijski
+problem niti traži globalno optimalno rješenje, već odluke o punjenju i pražnjenju
 donosi prema unaprijed definiranim pravilima.
 
-- U scenariju **PV + baterija** baterija se puni isključivo iz raspoložive
-  proizvodnje fotonaponske elektrane, dok se pražnjenje provodi tijekom
-  četiri sata s najvišom tržišnom cijenom električne energije.
+- U scenariju **PV + baterija** primjenjuje se strategija maksimalne
+  samopotrošnje (*self-consumption*). U svakom vremenskom koraku
+  redoslijedom odlučivanja:
+  1. PV najprije napaja potrošnju kućanstva,
+  2. višak PV-a puni bateriju do gornje granice SOC-a,
+  3. ako PV ne pokriva potrošnju, baterija se prazni za nadoknadu
+     nedostatka do dostupne energije baterije,
+  4. preostali dio potrošnje pokriva se uvozom iz mreže.
+
+  Cijena električne energije ne utječe izravno na odluke – ušteda
+  nastaje kroz smanjeni uvoz u satima viših cijena.
 
 - U scenariju **Baterija spojena na mrežu** punjenje se provodi tijekom
-  četiri sata s najnižom cijenom električne energije, dok se pražnjenje
-  provodi tijekom četiri sata s najvišom cijenom.
+  najjeftinijih vremenskih koraka koji ukupno pokrivaju približno 4 sata
+  (16 slotova za 15-min raster, 4 slota za satni raster), dok se
+  pražnjenje provodi tijekom najskupljih vremenskih koraka jednake
+  ukupne duljine.
 
 Tijekom simulacije heuristički algoritam poštuje ista fizikalna ograničenja
 kao i MILP model, uključujući ograničenja stanja napunjenosti baterije,
 maksimalne snage punjenja i pražnjenja te uvjet da završno stanje
 napunjenosti baterije ne smije biti manje od početnog.
 
-Punjenje i pražnjenje dodatno su ograničeni raspoloživim kapacitetom baterije, 
-maksimalnom dopuštenom snagom punjenja i pražnjenja te 
+Punjenje i pražnjenje dodatno su ograničeni raspoloživim kapacitetom baterije,
+maksimalnom dopuštenom snagom punjenja i pražnjenja te
 uvjetom da završno stanje napunjenosti baterije ne bude manje od početnog.
+""")
+
+    st.divider()
+
+    # -------------------------------------------------
+    # IZRAČUN UŠTEDE
+    # -------------------------------------------------
+
+    with st.expander(
+        "Izračun uštede (samo scenarij 1)"
+    ):
+
+        st.markdown("""
+U scenariju **PV + baterija** ušteda se ne pojavljuje kao izravan prihod
+od pražnjenja (baterija ne prodaje energiju u mrežu), već kao **razlika
+u trošku uvoza** u odnosu na referentnu situaciju bez baterije.
+
+**Referentni (baseline) scenarij bez baterije** – PV izravno napaja
+potrošnju, a preostali dio potrošnje pokriva se uvozom iz mreže:
+""")
+
+        st.latex(r"""
+P_{grid}^{base}(t)
+=
+\max\bigl(
+0,\;
+P_{load}(t)-\min\bigl(P_{PV}(t),\,P_{load}(t)\bigr)
+\bigr)
+""")
+
+        st.latex(r"""
+C_{base}
+=
+\sum_{t=1}^{T}
+c(t)\,P_{grid}^{base}(t)\,\Delta t
+""")
+
+        st.markdown("""
+**Optimizirani scenarij (s baterijom)** – ukupni trošak koji minimizira
+funkcija cilja (uvoz + degradacija):
+""")
+
+        st.latex(r"""
+C_{bat}
+=
+\sum_{t=1}^{T}
+\left(
+c(t)\,P_{grid}(t)
++
+c_{deg}\bigl(P_{ch}(t)+P_{dis}(t)\bigr)
+\right)\Delta t
+""")
+
+        st.markdown("**Dnevna ušteda:**")
+
+        st.latex(r"""
+\Delta C = C_{base} - C_{bat}
+""")
+
+        st.markdown("""
+Pozitivna vrijednost *ΔC* znači da uporaba baterije donosi financijsku
+korist – smanjeni trošak uvoza premašuje trošak degradacije. Ušteda
+raste kada se vrhovi potrošnje poklapaju sa satima viših cijena, jer
+baterija tada zamjenjuje skupi uvoz jeftinijom energijom uskladištenom
+iz PV-a.
 """)
 
     st.divider()
@@ -857,30 +1263,57 @@ odnosu na jednostavnu heurističku strategiju upravljanja baterijom.
     # TAB O APLIKACIJI 
     #------------------------------------------------
 
-with tab_about: 
+with tab_about:
 
     st.header("O aplikaciji")
 
     st.markdown("""
-Aplikacija omogućuje optimizaciju rada baterijskog 
-spremnika u dva scenarija: baterija spojena na 
-fotonaponsku elektranu ili baterija spojena 
-izravno na elektroenergetsku mrežu.
+Aplikacija omogućuje optimizaciju rada baterijskog spremnika (BESS)
+u dva scenarija rada:
 
-Korištene tehnologije
+- **PV + baterija** – kućanstvo s vlastitom PV elektranom, baterijom i
+  priključkom na elektroenergetsku mrežu. PV proizvodnja može napajati
+  potrošnju ili puniti bateriju; baterija se prazni isključivo u
+  kućanstvo. Uvoz iz mreže je dopušten, izvoz i pražnjenje baterije
+  u mrežu nisu.
+- **Baterija spojena na mrežu** – baterija kupuje energiju iz mreže u
+  satima nižih cijena i prazni je u mrežu pri višim cijenama radi
+  ostvarivanja arbitražne dobiti.
+
+### Ključne značajke
+
+- **MILP optimizacija** (PuLP + CBC solver) s degradacijom i binarnim
+  ograničenjem istovremenog punjenja/pražnjenja.
+- **Heuristička referentna metoda**: samopotrošnja (PV scenarij) ili
+  odabir najjeftinijih/najskupljih koraka (grid scenarij).
+- **15-minutni raster** (Δt = 0.25 h, 96 vremenskih koraka po danu),
+  s podrškom i za satni raster.
+- **Katalog profila potrošnje** kućanstva: rezidencijalni s večernjim
+  vrhom, poslovni s dnevnim vrhom, ravni (industrijski), noćna smjena.
+- **Analiza povijesnih dana** – Open-Meteo Archive (ERA5) + ENTSO-E
+  povijesne cijene, za usporedbu scenarija pri različitim vremenskim
+  i tržišnim uvjetima.
+- **Izračun uštede** u odnosu na baseline scenarij bez baterije.
+
+### Korištene tehnologije
 
 - Python
-- Streamlit
-- PuLP (MILP optimizacija)
-- Open-Meteo API
-- ENTSO-E Transparency Platform
+- Streamlit (interaktivno sučelje)
+- PuLP + CBC solver (MILP optimizacija)
+- Plotly (interaktivni grafovi)
+- Open-Meteo Forecast API (prognoza Sunčevog zračenja)
+- Open-Meteo Archive API (povijesna ERA5 reanaliza)
+- ENTSO-E Transparency Platform (day-ahead cijene, prognozne i povijesne)
 
 ### Završni rad
 Fakultet elektrotehnike, strojarstva i brodogradnje (FESB)
 Sveučilište u Splitu
-\n
-Računarstvo (120)\n
-Autor: Antonija Kežić\n
-Mentor: Ivo Marinić-Kragić\n
+
+Računarstvo (120)
+
+Autor: Antonija Kežić
+
+Mentor: Ivo Marinić-Kragić
+
 Akademska godina: 2025./2026.
 """)

@@ -27,7 +27,8 @@ def optimize_battery(
     c_rate,
     c_deg,
     dt,
-    scenario
+    scenario,
+    p_load=None
 
 ):
 
@@ -37,13 +38,28 @@ def optimize_battery(
     )
 
     soc_hours = range(len(prices) + 1)
-    
+
     hours = range(len(prices))
-    
+
     if len(prices) != len(p_pv):
             raise ValueError(
             "Broj cijena i PV proizvodnje mora biti jednak."
         )
+
+    if scenario == "PV + baterija":
+
+        if p_load is None:
+
+            raise ValueError(
+                "Profil potrošnje (p_load) obavezan je za scenarij "
+                "'PV + baterija'."
+            )
+
+        if len(p_load) != len(prices):
+
+            raise ValueError(
+                "Broj sati potrošnje i cijena mora biti jednak."
+            )
 
     p_limit = min(
         p_max,
@@ -80,6 +96,21 @@ def optimize_battery(
         cat="Binary"
     )
 
+    # PV-to-load i uvoz iz mreže uvode se samo u PV scenariju
+    if scenario == "PV + baterija":
+
+        p_pv_load = LpVariable.dicts(
+            "P_pv_load",
+            hours,
+            lowBound=0
+        )
+
+        p_grid_imp = LpVariable.dicts(
+            "P_grid_imp",
+            hours,
+            lowBound=0
+        )
+
     # -------------------
     # POČETNI SOC
     # -------------------
@@ -88,7 +119,7 @@ def optimize_battery(
         soc[0] == soc0,
         "Initial_SOC"
     )
-    
+
     problem += (
         soc[len(prices)] >= soc0,    #Završni SOC mora biti najmanje jednak početnom SOC-u
         "Final_SOC"
@@ -116,11 +147,24 @@ def optimize_battery(
             f"SOC_balance_{t}"
         )
 
-        # Punjenje samo iz PV
         if scenario == "PV + baterija":
+
+            # PV se raspoređuje na potrošnju i punjenje baterije;
+            # višak (ako postoji) se ne izvozi u mrežu (curtailment).
             problem += (
-                p_charge[t] <= p_pv[t],    #Punjenje baterije ograničeno je dostupnom PV proizvodnjom
-                f"PV_limit_{t}"
+                p_pv_load[t] + p_charge[t] <= p_pv[t],
+                f"PV_split_{t}"
+            )
+
+            # Balans potrošnje - potrošnja se pokriva iz PV-a,
+            # pražnjenja baterije i uvoza iz mreže. Budući da su
+            # sve varijable >= 0, ovaj balans ujedno onemogućava
+            # slanje viška discharge-a u mrežu.
+            problem += (
+                p_pv_load[t] + p_discharge[t] + p_grid_imp[t]
+                ==
+                p_load[t],
+                f"Load_balance_{t}"
             )
 
         # Punjenje ili pražnjenje - istovremeno nije dopusteno
@@ -144,20 +188,23 @@ def optimize_battery(
 
     if scenario == "PV + baterija":
 
+        # Trošak uvoza iz mreže + trošak degradacije baterije.
+        # Nema izravne "koristi" od pražnjenja jer se baterija ne
+        # prazni u mrežu - ušteda se ostvaruje kroz smanjeni uvoz.
         problem += lpSum(
 
             (
 
+                (prices[t] / 1000)
+                *
+                p_grid_imp[t]
+                * dt
+
+                +
+
                 c_deg
                 *
                 (p_charge[t] + p_discharge[t])
-                * dt
-
-                -
-
-                (prices[t] / 1000)
-                *
-                p_discharge[t]
                 * dt
 
             )
@@ -236,6 +283,20 @@ def optimize_battery(
         for t in  soc_hours
 
     ]
+
+    if scenario == "PV + baterija":
+
+        pv_load = [value(p_pv_load[t]) for t in hours]
+
+        grid_imp = [value(p_grid_imp[t]) for t in hours]
+
+        return (
+            soc_values,
+            charge,
+            discharge,
+            pv_load,
+            grid_imp
+        )
 
     return (
         soc_values,

@@ -18,7 +18,8 @@ def simulate_battery(
     dt,
     e_max,
     c_rate,
-    scenario
+    scenario,
+    p_load=None
 
 ):
 
@@ -27,6 +28,10 @@ def simulate_battery(
     p_charge = []
 
     p_discharge = []
+
+    pv_to_load_list = []
+
+    grid_imp_list = []
 
     current_soc = soc0
 
@@ -39,19 +44,23 @@ def simulate_battery(
     )
 
     # ----------------------------------------
-    # Heuristički odabir sati
+    # Heuristički odabir sati (samo za grid scenarij).
+    # Cilja ~4 sata jeftinih/skupih neovisno o rezoluciji dt -
+    # za 15-min raster to je 16 slotova.
     # ----------------------------------------
+
+    n_target_slots = max(1, int(round(4.0 / dt)))
 
     cheap_hours = sorted(
         range(len(prices)),
         key=lambda i: prices[i]
-    )[:4]
+    )[:n_target_slots]
 
     expensive_hours = sorted(
         range(len(prices)),
         key=lambda i: prices[i],
         reverse=True
-    )[:4]
+    )[:n_target_slots]
 
     # ----------------------------------------
     # Simulacija
@@ -61,6 +70,8 @@ def simulate_battery(
 
         charge = 0.0
         discharge = 0.0
+        pv_to_load = 0.0
+        grid_imp = 0.0
 
         # Maksimalna energija koju još možemo pohraniti
 
@@ -93,18 +104,37 @@ def simulate_battery(
         )
 
         # -----------------------------------
-        # PV + baterija
+        # PV + baterija (self-consumption)
         # -----------------------------------
 
         if scenario == "PV + baterija":
 
-            # Punjenje samo iz PV
+            if p_load is None:
 
-            if p_pv[hour] > 0 and current_soc < SOC_MAX:
+                raise ValueError(
+                    "Profil potrošnje (p_load) obavezan je za "
+                    "scenarij 'PV + baterija'."
+                )
+
+            load = p_load[hour]
+
+            pv = p_pv[hour]
+
+            # 1) PV prvo pokriva potrošnju
+
+            pv_to_load = min(pv, load)
+
+            pv_surplus = pv - pv_to_load
+            load_deficit = load - pv_to_load
+
+            # 2) Višak PV-a puni bateriju (višak preko toga se ne
+            #    izvozi u mrežu - curtailment)
+
+            if pv_surplus > 0 and current_soc < SOC_MAX:
 
                 charge = min(
 
-                    p_pv[hour],
+                    pv_surplus,
 
                     p_limit,
 
@@ -114,14 +144,14 @@ def simulate_battery(
 
                 )
 
-            # Pražnjenje samo u najskupljim satima
+            # 3) Kad PV ne pokriva potrošnju, baterija se prazni
+            #    da nadoknadi nedostatak
 
-            elif (
-                hour in expensive_hours
-                and available_for_discharge > 0
-            ):
+            if load_deficit > 0 and available_for_discharge > 0:
 
                 discharge = min(
+
+                    load_deficit,
 
                     p_limit,
 
@@ -132,6 +162,13 @@ def simulate_battery(
                     dt
 
                 )
+
+            # 4) Preostali dio potrošnje pokriva se iz mreže
+
+            grid_imp = max(
+                0.0,
+                load_deficit - discharge
+            )
 
         # -----------------------------------
         # Baterija spojena na mrežu
@@ -205,7 +242,19 @@ def simulate_battery(
 
         p_charge.append(charge)
         p_discharge.append(discharge)
+        pv_to_load_list.append(pv_to_load)
+        grid_imp_list.append(grid_imp)
         soc.append(current_soc)
+
+    if scenario == "PV + baterija":
+
+        return (
+            soc,
+            p_charge,
+            p_discharge,
+            pv_to_load_list,
+            grid_imp_list
+        )
 
     return (
         soc,

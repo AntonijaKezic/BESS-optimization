@@ -11,10 +11,24 @@ API_KEY = os.getenv("ENTSOE_API_KEY")
 
 def _parse_prices_from_xml(xml_text):
     """
-    Parsira ENTSO-E XML.
+    Parsira ENTSO-E Publication_MarketDocument.
 
-    ENTSO-E vraća 15-minutne cijene (PT15M).
-    Ova funkcija ih pretvara u 24 satne cijene.
+    Vraća cijene iz prvog TimeSeries/Period-a koji uspije dati
+    kompletan niz. Ovo je važno jer ENTSO-E često vraća više
+    TimeSeries u istom odgovoru (npr. tražiš današnji dan a dobiješ
+    i sutrašnji ili prošli dan) - naivno spajanje svih Point-ova
+    dovelo bi do miješanja podataka iz različitih dana.
+
+    Podržava sparse enkoding (curveType=A03) gdje pozicije s istom
+    cijenom kao prethodna nisu ponovno navedene - vrijednosti se
+    forward-fill-aju do sljedeće eksplicitne pozicije.
+
+    Detektira rezoluciju iz <ns:resolution>:
+      - PT15M → 96 vrijednosti
+      - PT30M → 48 vrijednosti
+      - PT60M → 24 vrijednosti
+
+    Vraća: (prices, resolution_minutes)
     """
 
     root = ET.fromstring(xml_text)
@@ -23,60 +37,109 @@ def _parse_prices_from_xml(xml_text):
         "ns": "urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3"
     }
 
-    # spremnik svih 96 intervala
-    values = {}
+    for ts in root.findall(".//ns:TimeSeries", ns):
 
-    for point in root.findall(".//ns:Point", ns):
+        for period in ts.findall(".//ns:Period", ns):
 
-        pos = point.find("ns:position", ns)
-        price = point.find("ns:price.amount", ns)
+            res_el = period.find("ns:resolution", ns)
 
-        if pos is None or price is None:
-            continue
+            if res_el is None or not res_el.text:
+                continue
 
-        try:
-            values[int(pos.text)] = float(price.text)
-        except ValueError:
-            continue
+            text = res_el.text.upper()
 
-    hourly_prices = []
+            if "PT15M" in text:
+                resolution_min = 15
+            elif "PT30M" in text:
+                resolution_min = 30
+            elif "PT60M" in text or "PT1H" in text:
+                resolution_min = 60
+            else:
+                continue
 
-    for hour in range(24):
+            n_expected = 24 * 60 // resolution_min
 
-        start = hour * 4 + 1
+            explicit = {}
 
-        block = []
+            for point in period.findall("ns:Point", ns):
 
-        for p in range(start, start + 4):
+                pos_el = point.find("ns:position", ns)
+                price_el = point.find("ns:price.amount", ns)
 
-            if p in values:
-                block.append(values[p])
+                if pos_el is None or price_el is None:
+                    continue
 
-        if len(block) == 0:
+                try:
+                    explicit[int(pos_el.text)] = float(price_el.text)
+                except ValueError:
+                    continue
 
-            hourly_prices.append(None)
+            if not explicit:
+                continue
 
-        else:
+            # Forward-fill za sparse enkoding (curveType=A03)
+            prices = []
+            last = None
 
-            hourly_prices.append(sum(block) / len(block))
+            for p in range(1, n_expected + 1):
 
-    return hourly_prices
+                if p in explicit:
+                    last = explicit[p]
+
+                prices.append(last)
+
+            # Ako ni prva pozicija nije eksplicitna, ne možemo
+            # forward-fill - preskoči ovaj period
+            if prices[0] is None:
+                continue
+
+            return prices, resolution_min
+
+    return [], 60
 
 
-def get_prices():
+def get_prices(target_date=None):
+    """Dohvaća day-ahead cijene iz ENTSO-E za područje Hrvatske.
+
+    Ako je zadan target_date (datetime.date), dohvaća cijene samo
+    za taj datum (za povijesne analize). U protivnom, pokušava
+    prvo sutrašnji, a onda današnji datum (originalno ponašanje).
+
+    Vraća dict s ključevima:
+    - "prices": list[float] u prirodnoj rezoluciji (24 satne ili
+      96 15-minutnih vrijednosti), ili prazna lista ako dohvat ne uspije
+    - "day": "tomorrow" | "today" | "historical" | None
+    - "resolution_minutes": 15 | 60 (ili None ako prazno)
+    """
 
     session = requests.Session()
 
-    attempts = [
+    if target_date is not None:
 
-        (1, "tomorrow"),
-        (0, "today")
+        # Povijesni datum - pokušaj samo taj jedan datum
+        day = datetime.combine(
+            target_date,
+            datetime.min.time()
+        )
 
-    ]
+        attempts = [(day, "historical")]
 
-    for offset, label in attempts:
+    else:
 
-        day = datetime.now() + timedelta(days=offset)
+        # Default: prvo sutra, ako ne, danas
+        today = datetime.now().replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        attempts = [
+            (today + timedelta(days=1), "tomorrow"),
+            (today, "today"),
+        ]
+
+    for day, label in attempts:
 
         start = day.replace(
             hour=0,
@@ -119,23 +182,29 @@ def get_prices():
 
                 continue
 
-            prices = _parse_prices_from_xml(response.text)
+            prices, resolution_min = _parse_prices_from_xml(response.text)
 
-            # ako postoji barem jedna None,
-            # znači da nedostaju podaci
+            # Ako postoji barem jedan None, znači da nedostaju podaci
             if any(p is None for p in prices):
 
-                print("Nedostaju neki intervali.")
+                print(
+                    "Nedostaju neki intervali "
+                    f"({sum(1 for p in prices if p is None)} od {len(prices)})."
+                )
 
                 continue
 
-            if len(prices) == 24:
+            expected = 24 * 60 // resolution_min
+
+            if len(prices) == expected:
 
                 return {
 
                     "prices": prices,
 
-                    "day": label
+                    "day": label,
+
+                    "resolution_minutes": resolution_min
 
                 }
 
@@ -147,7 +216,9 @@ def get_prices():
 
         "prices": [],
 
-        "day": None
+        "day": None,
+
+        "resolution_minutes": None
 
     }
 
@@ -159,7 +230,6 @@ if __name__ == "__main__":
     print()
 
     print("Dan:", data["day"])
-
+    print("Rezolucija:", data["resolution_minutes"], "min")
     print("Broj cijena:", len(data["prices"]))
-
     print(data["prices"])
