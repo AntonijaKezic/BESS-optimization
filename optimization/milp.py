@@ -140,7 +140,7 @@ def optimize_battery(
             (
                 eta_ch * p_charge[t]
                 -
-                p_discharge[t] / eta_dis
+                p_discharge[t] * (1// eta_dis)
             )
             * dt
             / e_max,
