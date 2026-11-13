@@ -83,7 +83,7 @@ BESS_optimization/
 Clone the repository:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/BESS_optimization.git
+git clone https://github.com/AntonijaKezic/BESS_optimization.git
 ```
 
 Install the required dependencies:
